@@ -1,0 +1,256 @@
+# =============================================================================
+# Synthetic Leishmania dataset for SLEAP pretraining
+# =============================================================================
+#
+# Goal: pretrain a SLEAP pose model that generalises to real phase-contrast
+# recordings of Leishmania promastigotes at BOTH 20x and 60x. Real cultures
+# include WT cells and various mutants (aggressive curls, altered beat
+# frequencies, paralysed cells); the synthetic distribution should cover all
+# of these.
+#
+# Variation strategy:
+#   - Per-FRAME jitter in random mode (`per_frame_jitter: true` by default):
+#     every frame draws PSF, halo, gain, full-well, and read noise from a
+#     band around the setup defaults. So a 2200-frame random setup is
+#     effectively 2200 different "sessions" in one block.
+#   - Per-CLIP jitter via `repeats: N`: the video setups below each expand
+#     into N independent short clips, each with its own seed and per-clip
+#     drift in optics/noise. This gives many short tracking sequences
+#     instead of one long monotonous video.
+#   - Per-CELL darkness range (in `sample_random_parasite`): cells in the
+#     same frame have visibly different opacity (dense mature cells -> very
+#     dark; thinner younger cells -> lighter).
+#   - Per-FRAME background regenerated with widened dust/debris/blob ranges.
+#
+# Mutant phenotypes (aggressive curls, altered frequencies, ~5% paralysed)
+# come from the wide sampling distribution in sample_random_parasite — no
+# mutant-specific setup needed.
+#
+# Frame budget: ~12,500 across 12 setup definitions.  After repeat expansion,
+# the video setups produce 50 separate clip folders.  Total folders: ~60.
+#
+# Run with:
+#   python dataset_builder.py multi sleap_pretrain_config.yaml
+# =============================================================================
+
+output_dir: data/leishmania_pretrain
+mode: random
+seed: 42
+
+# --- Defaults applied to every setup unless overridden ---
+
+n_frames: 1500
+image_shape: [1024, 1024]
+flag_keypoints: 5                 # 5 interior flagellum nodes (Flag1..Flag5)
+                                  # Skeleton total: Head, Base, Flag1..Flag5, Tip = 8 nodes
+fast: true
+video_format: mp4
+embed_frames: false
+per_frame_jitter: true            # random mode: jitter PSF/halo/gain/noise per frame
+
+# Video-mode defaults
+fps: 60.0
+n_parasites: 27
+periodic_boundary: true
+
+# Random-mode defaults
+parasites_per_frame: [9, 27]
+bg_intensity_range: [0.25, 0.95]    # very wide bright/dim session variation
+
+save_frames: all
+
+# Optics: defaults match a 60x phase-contrast acquisition.
+# 20x setups override pixel_size_um and PSF parameters.
+optics:
+  pixel_size_um: 0.108           # 60x objective
+  psf_sigma_um: 0.13             # NA ~0.85, lambda ~550nm
+  halo_strength: 0.7
+  halo_lowpass_sigma_um: 3.9
+  intensity_gain: 0.7
+  shadeoff_threshold: 0.77
+  shadeoff_strength: 0.15
+  body_edge_smooth_sigma_um: 0.3
+
+# Camera noise: realistic sCMOS in normal-light Ph1 mode
+noise:
+  full_well_photons: 2000.0
+  read_noise_e: 3
+  bg_intensity: 0.7
+  dark_offset: -0.05
+
+
+# =============================================================================
+# Setups
+# =============================================================================
+
+setups:
+
+  # ---------------------------------------------------------------------------
+  # PRIMARY 20x and 60x random pools (per-frame jitter -> diverse "sessions")
+  # ---------------------------------------------------------------------------
+  - name: 20x_main
+    n_frames: 2200
+    optics:
+      pixel_size_um: 0.325       # 20x
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [14, 44]
+
+  - name: 60x_main
+    n_frames: 2200
+    parasites_per_frame: [5, 21]
+
+  # ---------------------------------------------------------------------------
+  # DENSITY VARIATIONS
+  # ---------------------------------------------------------------------------
+  - name: 20x_dense
+    n_frames: 1100
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [44, 98]
+
+  - name: 60x_dense
+    n_frames: 1100
+    parasites_per_frame: [21, 44]
+
+  # ---------------------------------------------------------------------------
+  # VERY DENSE - extreme cell counts for crossing-flagella / overlap learning.
+  # Stationary-phase cultures and hemocytometer chambers can look like this.
+  # The model needs to handle these hard cases (occlusion, halo collisions,
+  # many crossings) so it doesn't fail on real dense fields of view.
+  # ---------------------------------------------------------------------------
+  - name: 20x_very_dense
+    n_frames: 500
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [178, 356]    # many crossings at 20x
+
+  - name: 60x_very_dense
+    n_frames: 500
+    parasites_per_frame: [71, 142]      # heavy overlap at 60x
+
+  # ---------------------------------------------------------------------------
+  # LIGHTING VARIATIONS - shifts base distribution to dimmer half of plausible
+  # range. Per-frame jitter then explores around the dim baseline.
+  # ---------------------------------------------------------------------------
+  - name: 20x_dimmer
+    n_frames: 800
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    noise:
+      full_well_photons: 1500
+      read_noise_e: 5
+      bg_intensity: 0.55
+    bg_intensity_range: [0.45, 0.65]
+    parasites_per_frame: [14, 44]
+
+  - name: 60x_dimmer
+    n_frames: 800
+    noise:
+      full_well_photons: 1500
+      read_noise_e: 5
+      bg_intensity: 0.55
+    bg_intensity_range: [0.45, 0.65]
+    parasites_per_frame: [5, 21]
+
+  # ---------------------------------------------------------------------------
+  # EXTREME LOW SNR - dramatic noise + dim conditions, marginal acquisition.
+  # Few-hundred-photon full well, high read noise, dim background. The model
+  # needs to handle these so it doesn't fail on actually-noisy real recordings
+  # (short exposures, low illumination, old cameras, weak lamps).
+  # Frames that come out of these setups should look visibly grainy.
+  # ---------------------------------------------------------------------------
+  - name: 20x_low_snr
+    n_frames: 600
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    noise:
+      full_well_photons: 500          # very low photon budget
+      read_noise_e: 7                 # high read noise (~older camera)
+      bg_intensity: 0.40              # dim baseline
+      dark_offset: -0.05
+    bg_intensity_range: [0.25, 0.55]  # very dim sessions
+    parasites_per_frame: [14, 44]
+
+  - name: 60x_low_snr
+    n_frames: 600
+    noise:
+      full_well_photons: 500
+      read_noise_e: 7
+      bg_intensity: 0.40
+      dark_offset: -0.05
+    bg_intensity_range: [0.25, 0.55]
+    parasites_per_frame: [5, 21]
+
+  # ---------------------------------------------------------------------------
+  # FOCUS VARIATIONS - inflated PSF baseline; jitter widens further.
+  # ---------------------------------------------------------------------------
+  - name: 20x_defocused
+    n_frames: 800
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.55
+      halo_strength: 1.0
+      halo_lowpass_sigma_um: 6.0
+    parasites_per_frame: [14, 44]
+
+  - name: 60x_defocused
+    n_frames: 800
+    optics:
+      psf_sigma_um: 0.30
+      halo_strength: 1.0
+      halo_lowpass_sigma_um: 5.5
+    parasites_per_frame: [5, 21]
+
+  # ---------------------------------------------------------------------------
+  # OFF-MAGNIFICATION (smaller portion of total budget)
+  # ---------------------------------------------------------------------------
+  - name: 40x_intermediate
+    n_frames: 800
+    optics:
+      pixel_size_um: 0.163
+      psf_sigma_um: 0.20
+      halo_lowpass_sigma_um: 3.5
+    parasites_per_frame: [11, 32]
+
+  - name: 100x_detail
+    n_frames: 500
+    optics:
+      pixel_size_um: 0.065
+      psf_sigma_um: 0.10
+      halo_lowpass_sigma_um: 3.0
+    parasites_per_frame: [2, 9]
+
+  # ---------------------------------------------------------------------------
+  # SHORT VIDEO CLIPS - for tracking-model pretraining.
+  # `repeats: 25` expands each into 25 independent 1.5s clips, each with own
+  # parasites/background and own per-clip drift in optics/noise (within
+  # realistic envelopes). All saved frames at every_n=5 -> ~18 frames/clip.
+  # ---------------------------------------------------------------------------
+  - name: 20x_short_clips
+    mode: video
+    n_frames: 90                 # 1.5s at 60fps per clip
+    fps: 60.0
+    n_parasites: 25
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    repeats: 25                  # 25 short clips with per-clip jitter
+    save_frames: {every_n: 5}    # ~18 saved/clip × 25 = ~450 frames
+
+  - name: 60x_short_clips
+    mode: video
+    n_frames: 90
+    fps: 60.0
+    n_parasites: 12
+    repeats: 25
+    save_frames: {every_n: 5}    # ~450 frames

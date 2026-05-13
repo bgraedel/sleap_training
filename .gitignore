@@ -1,0 +1,53 @@
+# Virtual environment
+sleapy/
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# SLEAP model outputs and checkpoints
+models/
+*.slp
+*.pkg.slp
+data/
+
+# Large data files
+*.mp4
+*.avi
+*.tif
+*.tiff
+*.h5
+*.hdf5
+*.npz
+*.npy
+*.csv
+
+# Logs and temporary files
+*.log
+*.tmp
+list.txt
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
