@@ -1,0 +1,268 @@
+# =============================================================================
+# Synthetic Leishmania dataset for SEGMENTATION pretraining
+# =============================================================================
+#
+# Segmentation analogue of `sleap_pretrain_config.yaml` (the pose config).
+# Same domain-randomisation variety, scaled down to ~3000 frames.
+#
+# One generation run produces everything for the recommended TWO-MODEL pipeline:
+#   - labels/      single-class ANIMAL YOLO-seg polygons   (Stage 1: detector)
+#   - masks/       semantic body/flagellum maps {0,1,2}     (Stage 2: UNet)
+#   - instances/   16-bit animal-id maps                    (eval ground truth)
+#   - groups/      animal_id per YOLO label line            (association)
+#   - data.yaml + train.txt/val.txt                         (ultralytics)
+#
+# `seg_yolo_classes: animal` => the YOLO labels contain only the whole-animal
+# class (one instance per cell, never split by occlusion). Body/flagellum are
+# carried by the semantic masks for the UNet stage.
+#
+# Variation strategy (identical to the pose config):
+#   - Per-FRAME optics/noise jitter in random mode -> every frame is a
+#     different "session" (PSF, halo, gain, full-well, read noise).
+#   - Per-FRAME background regenerated with wide dust/debris/ring/hair ranges.
+#   - Per-CELL darkness range (in sample_random_parasite) -> diverse opacity.
+#   - Wide sampling distribution covers WT + mutant phenotypes (curls, altered
+#     beat frequencies, ~5% paralysed). No mutant-specific setup needed.
+#
+# NOTE vs the pose config: the two `*_short_clips` VIDEO setups are dropped.
+# The seg builder splits train/val per frame, so near-duplicate video frames
+# would leak across the split; and instance segmentation needs per-frame
+# diversity, not tracking sequences. Their budget went to the random pools.
+#
+# Frame budget: ~3000 (2690 positive + 310 negative, ~10% negatives).
+#
+# Run with:
+#   python segmentation_dataset_creator.py multi segmentation_config.yaml
+# =============================================================================
+
+output_dir: data/leishmania_seg     # required key; the seg builder does not
+                                     # write here (it uses seg_output_dir).
+seg_output_dir: data/leishmania_seg_ds   # <- the segmentation dataset lands here
+
+# --- Segmentation-specific options ---
+seg_yolo_classes: animal            # 'animal' (single-class) or 'all' (3-class)
+seg_val_fraction: 0.1
+seg_min_visible_frac: 0.05          # drop cells <5% visible (buried behind others)
+seg_min_polygon_area: 6.0           # px^2; drop sub-pixel YOLO polygons
+
+mode: random
+seed: 42
+
+# --- Defaults applied to every setup unless overridden ---
+
+n_frames: 1500
+image_shape: [1024, 1024]
+fast: true
+per_frame_jitter: true              # jitter PSF/halo/gain/noise per frame
+
+# Random-mode defaults
+parasites_per_frame: [9, 27]
+bg_intensity_range: [0.25, 0.95]    # very wide bright/dim session variation
+
+# Per-frame background clutter (dust/rings/ghost cells/hairs) multiplier.
+# Real cultures have rich backgrounds; sampling [0.8, 2.0] for positives
+# exposes the detector to realistic artifact density. Negatives go higher.
+clutter_level: [0.8, 2.0]
+
+save_frames: all
+
+# Optics: defaults match 60x phase-contrast. 20x/40x/100x setups override
+# pixel_size_um + PSF. Range values are sampled uniformly PER FRAME so one
+# setup spans clean/sharp -> heavy-halo/soft.
+optics:
+  pixel_size_um: 0.108
+  psf_sigma_um: 0.13
+  halo_strength: [0.25, 1.40]
+  halo_lowpass_sigma_um: [2.5, 6.5]
+  intensity_gain: [0.45, 1.00]
+  shadeoff_threshold: [0.60, 0.92]
+  shadeoff_strength: [0.05, 0.30]
+  body_edge_smooth_sigma_um: [0.15, 0.55]
+
+# Camera noise: realistic sCMOS, ranges sampled per frame.
+noise:
+  full_well_photons: [600, 4500]
+  read_noise_e: [1.5, 6.0]
+  bg_intensity: 0.7                 # overridden by bg_intensity_range
+  dark_offset: -0.05
+
+
+# =============================================================================
+# Setups  (n_frames scaled to a ~3000-frame budget; variety preserved)
+# =============================================================================
+
+setups:
+
+  # --- PRIMARY 20x and 60x random pools ------------------------------------
+  - name: 20x_main
+    n_frames: 500
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [14, 44]
+
+  - name: 60x_main
+    n_frames: 500
+    parasites_per_frame: [5, 21]
+
+  # --- DENSITY VARIATIONS --------------------------------------------------
+  - name: 20x_dense
+    n_frames: 200
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [44, 98]
+
+  - name: 60x_dense
+    n_frames: 200
+    parasites_per_frame: [21, 44]
+
+  # --- VERY DENSE - crossing flagella / heavy overlap.
+  # NOTE: these frames have hundreds of instances. When training YOLO, raise
+  # ultralytics `max_det` (e.g. 1000) so dense frames aren't truncated.
+  - name: 20x_very_dense
+    n_frames: 100
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [178, 356]
+
+  - name: 60x_very_dense
+    n_frames: 100
+    parasites_per_frame: [71, 142]
+
+  # --- LIGHTING VARIATIONS (dimmer baseline) -------------------------------
+  - name: 20x_dimmer
+    n_frames: 150
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    noise:
+      full_well_photons: 1500
+      read_noise_e: 5
+      bg_intensity: 0.55
+    bg_intensity_range: [0.45, 0.65]
+    parasites_per_frame: [14, 44]
+
+  - name: 60x_dimmer
+    n_frames: 150
+    noise:
+      full_well_photons: 1500
+      read_noise_e: 5
+      bg_intensity: 0.55
+    bg_intensity_range: [0.45, 0.65]
+    parasites_per_frame: [5, 21]
+
+  # --- EXTREME LOW SNR - grainy, marginal acquisition ----------------------
+  - name: 20x_low_snr
+    n_frames: 120
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    noise:
+      full_well_photons: 500
+      read_noise_e: 7
+      bg_intensity: 0.40
+      dark_offset: -0.05
+    bg_intensity_range: [0.25, 0.55]
+    parasites_per_frame: [14, 44]
+
+  - name: 60x_low_snr
+    n_frames: 120
+    noise:
+      full_well_photons: 500
+      read_noise_e: 7
+      bg_intensity: 0.40
+      dark_offset: -0.05
+    bg_intensity_range: [0.25, 0.55]
+    parasites_per_frame: [5, 21]
+
+  # --- FOCUS VARIATIONS (inflated PSF; jitter widens further) --------------
+  - name: 20x_defocused
+    n_frames: 150
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.55
+      halo_strength: 1.0
+      halo_lowpass_sigma_um: 6.0
+    parasites_per_frame: [14, 44]
+
+  - name: 60x_defocused
+    n_frames: 150
+    optics:
+      psf_sigma_um: 0.30
+      halo_strength: 1.0
+      halo_lowpass_sigma_um: 5.5
+    parasites_per_frame: [5, 21]
+
+  # --- OFF-MAGNIFICATION ---------------------------------------------------
+  - name: 40x_intermediate
+    n_frames: 150
+    optics:
+      pixel_size_um: 0.163
+      psf_sigma_um: 0.20
+      halo_lowpass_sigma_um: 3.5
+    parasites_per_frame: [11, 32]
+
+  - name: 100x_detail
+    n_frames: 100
+    optics:
+      pixel_size_um: 0.065
+      psf_sigma_um: 0.10
+      halo_lowpass_sigma_um: 3.0
+    parasites_per_frame: [2, 9]
+
+  # ---------------------------------------------------------------------------
+  # NEGATIVE FRAMES - empty/clutter-only frames. For YOLO these become images
+  # with empty label files (background examples that suppress false positives
+  # on halos/dust/debris rings/hairs); for the UNet they are all-background
+  # masks. ~10% of the positive count, spread across mags and SNR regimes.
+  # ---------------------------------------------------------------------------
+  - name: 60x_negatives
+    mode: negative
+    n_frames: 90
+    clutter_level: [1.0, 2.5]
+
+  - name: 20x_negatives
+    mode: negative
+    n_frames: 80
+    clutter_level: [1.0, 2.5]
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+
+  - name: 60x_negatives_dirty
+    mode: negative
+    n_frames: 60
+    clutter_level: [2.0, 4.0]              # heavy clutter — the trap setup
+    optics:
+      psf_sigma_um: 0.30
+      halo_strength: [0.8, 1.6]
+      halo_lowpass_sigma_um: [4.0, 7.0]
+    noise:
+      full_well_photons: [400, 1500]
+      read_noise_e: [4.0, 8.0]
+      bg_intensity: 0.55
+
+  - name: 60x_negatives_extreme_artifacts
+    mode: negative
+    n_frames: 40
+    clutter_level: [3.0, 5.0]              # cell-mimicking-artifact-rich
+    optics:
+      halo_strength: [1.0, 1.8]
+      halo_lowpass_sigma_um: [4.5, 7.0]
+
+  - name: 100x_negatives
+    mode: negative
+    n_frames: 40
+    clutter_level: [1.0, 3.0]
+    optics:
+      pixel_size_um: 0.065
+      psf_sigma_um: 0.10
+      halo_lowpass_sigma_um: 3.0

@@ -1,0 +1,126 @@
+# =============================================================================
+# High-magnification (60x + 100x) textured Leishmania dataset
+# =============================================================================
+#
+# Built from the hand-tuned look in `.json` (the GUI export the user liked):
+# heavy granules + white dots + vacuoles + fine grain, pointier tips, mild
+# outline irregularity, with the tuned phase-contrast optics.
+#
+#   * Two magnifications, 500 frames each (1000 total), each split into
+#     sparse / dense / very_dense density sub-conditions so DENSITY varies a
+#     lot. (Density numbers assume image_shape 1024x1024 — adjust if you change
+#     it: a 14 um cell is ~225 px at 100x and ~130 px at 60x.)
+#   * TEXTURE is the same physically-sized distribution at both mags (sizes are
+#     in um, so they resolve more finely at 100x than 60x automatically). The
+#     `microtexture:` ranges below are centered on the values from `.json` but
+#     widened so every frame samples a different look. microtexture_prob: 1.0
+#     -> every cell is textured.
+#   * Body SHAPE (length/width/phase/curvature/beat) is left to the renderer's
+#     normal wide sampling for training diversity — not pinned to the single
+#     cell in `.json`. Only the texture + optics are pinned to that look.
+#
+# Run (segmentation):
+#   python segmentation_dataset_creator.py multi config_texture_60x_100x.yaml
+# Run (SLEAP pose):
+#   python dataset_builder.py multi config_texture_60x_100x.yaml
+# (Both tools read this same file; the seg_* keys below are ignored by the
+#  pose builder.)
+# =============================================================================
+
+output_dir: data/leish_tex_60x_100x          # SLEAP pose builder writes here
+seg_output_dir: data/leish_tex_60x_100x_seg  # seg builder writes here
+
+# --- Segmentation-specific options (ignored by the pose builder) ---
+seg_yolo_classes: animal
+seg_val_fraction: 0.1
+seg_min_visible_frac: 0.05
+seg_min_polygon_area: 6.0
+
+mode: random
+seed: 1234
+image_shape: [1024, 1024]
+fast: true
+per_frame_jitter: true
+save_frames: all
+
+bg_intensity_range: [0.5, 0.9]
+clutter_level: [0.8, 2.0]
+
+# Every cell gets micro-texture at these mags.
+microtexture_prob: 1.0
+
+# --- Optics: tuned values from `.json`. Shared across mags except
+#     pixel_size_um (overridden per setup). A few fields are given as ranges so
+#     each frame is a slightly different "session" without leaving the look.
+optics:
+  pixel_size_um: 0.0621              # 100x default; 60x setups override to 0.108
+  psf_sigma_um: 0.227
+  halo_strength: [1.60, 2.05]
+  halo_lowpass_sigma_um: 0.603
+  intensity_gain: [0.30, 0.37]
+  shadeoff_threshold: 1.59
+  shadeoff_strength: [0.24, 0.33]
+  body_edge_smooth_sigma_um: 0.05
+
+# --- Camera noise (realistic sCMOS, around the `.json` values) ---
+noise:
+  full_well_photons: [1400, 3000]
+  read_noise_e: [2.0, 4.5]
+  dark_offset: -0.05
+  bg_intensity: 0.7                  # overridden per frame by bg_intensity_range
+
+# --- Micro-texture distribution (centered on `.json`, widened for variation).
+#     Each value is a [min, max] sampled per cell (or a scalar for a fixed
+#     value). Sizes in um.
+microtexture:
+  granule_density:          [0, 35]      # .json: 30
+  granule_strength:         [0.40, 0.80] # .json: 0.6 (absorption depth, dark)
+  granule_size_um:          [0.18, 0.36] # .json: 0.28
+  vacuole_density:          [0, 18]      # .json: 14.2 (bright clear spots)
+  vacuole_strength:         [0.40, 0.80] # .json: 0.6
+  vacuole_size_um:          [0.35, 0.60] # .json: 0.471
+  whitedot_density:         [5, 45]      # .json: 40 (small bright specks)
+  whitedot_strength:        [0.70, 1.60] # .json: 1.29 (brightness boost)
+  whitedot_size_um:         [0.07, 0.13] # .json: 0.0987
+  cytoplasm_grain_strength: [0.20, 0.65] # .json: 0.565 (fine grain)
+  cytoplasm_grain_scale:    [12.0, 24.0] # .json: 22.4
+  body_edge_irregularity:   [0.01, 0.08] # .json: 0.0316
+  tip_sharpness:            [0.40, 1.40] # .json: 1.02
+
+
+# =============================================================================
+# Setups — 500 frames per magnification, split by density.
+# =============================================================================
+setups:
+
+  # ----------------------------- 100x (500) --------------------------------
+  - name: 100x_sparse
+    n_frames: 200
+    parasites_per_frame: [1, 5]
+
+  - name: 100x_dense
+    n_frames: 200
+    parasites_per_frame: [5, 14]
+
+  - name: 100x_very_dense
+    n_frames: 100
+    parasites_per_frame: [12, 26]
+
+  # ------------------------------ 60x (500) --------------------------------
+  - name: 60x_sparse
+    n_frames: 200
+    parasites_per_frame: [2, 9]
+    optics:
+      pixel_size_um: 0.108
+
+  - name: 60x_dense
+    n_frames: 200
+    parasites_per_frame: [9, 24]
+    optics:
+      pixel_size_um: 0.108
+
+  - name: 60x_very_dense
+    n_frames: 100
+    parasites_per_frame: [22, 46]
+    optics:
+      pixel_size_um: 0.108

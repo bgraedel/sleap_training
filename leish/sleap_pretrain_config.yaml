@@ -33,7 +33,7 @@
 #   python dataset_builder.py multi sleap_pretrain_config.yaml
 # =============================================================================
 
-output_dir: data/leishmania_pretrain
+output_dir: data/leishmania_pretrain_2
 mode: random
 seed: 42
 
@@ -45,7 +45,7 @@ flag_keypoints: 5                 # 5 interior flagellum nodes (Flag1..Flag5)
                                   # Skeleton total: Head, Base, Flag1..Flag5, Tip = 8 nodes
 fast: true
 video_format: mp4
-embed_frames: false
+embed_frames: true
 per_frame_jitter: true            # random mode: jitter PSF/halo/gain/noise per frame
 
 # Video-mode defaults
@@ -57,25 +57,37 @@ periodic_boundary: true
 parasites_per_frame: [9, 27]
 bg_intensity_range: [0.25, 0.95]    # very wide bright/dim session variation
 
+# Per-frame background clutter (dust/rings/ghost cells) intensity multiplier.
+# 1.0 is "normal" PhC. Real cultures often have richer backgrounds, so we
+# sample in [0.8, 2.0] for positives to expose the model to realistic
+# artifact density alongside real cells. Negative setups override this with
+# higher values to create hard-negative training examples.
+clutter_level: [0.8, 2.0]
+
 save_frames: all
 
 # Optics: defaults match a 60x phase-contrast acquisition.
 # 20x setups override pixel_size_um and PSF parameters.
 optics:
-  pixel_size_um: 0.108           # 60x objective
-  psf_sigma_um: 0.13             # NA ~0.85, lambda ~550nm
-  halo_strength: 0.7
-  halo_lowpass_sigma_um: 3.9
-  intensity_gain: 0.7
-  shadeoff_threshold: 0.77
-  shadeoff_strength: 0.15
-  body_edge_smooth_sigma_um: 0.3
+  pixel_size_um: 0.108           # 60x objective (kept scalar - mag-specific)
+  psf_sigma_um: 0.13             # scalar -> multiplicative jitter
+  # The rest are EXPLICIT RANGES sampled uniformly per frame. Sample from
+  # WIDE bands so the model sees clean/sharp through to heavy-halo/soft within
+  # one setup. Per-setup overrides below can narrow these to mag-appropriate
+  # subranges.
+  halo_strength: [0.25, 1.40]
+  halo_lowpass_sigma_um: [2.5, 6.5]
+  intensity_gain: [0.45, 1.00]
+  shadeoff_threshold: [0.60, 0.92]
+  shadeoff_strength: [0.05, 0.30]
+  body_edge_smooth_sigma_um: [0.15, 0.55]
 
-# Camera noise: realistic sCMOS in normal-light Ph1 mode
+# Camera noise: realistic sCMOS in normal-light Ph1 mode.
+# Ranges sampled per frame for session-to-session variation.
 noise:
-  full_well_photons: 2000.0
-  read_noise_e: 3
-  bg_intensity: 0.7
+  full_well_photons: [600, 4500]   # very-low-light → bright illumination
+  read_noise_e: [1.5, 6.0]
+  bg_intensity: 0.7                # scalar - actually overridden by bg_intensity_range
   dark_offset: -0.05
 
 
@@ -254,3 +266,63 @@ setups:
     n_parasites: 12
     repeats: 25
     save_frames: {every_n: 5}    # ~450 frames
+
+  # ---------------------------------------------------------------------------
+  # NEGATIVE FRAMES - empty-background frames for sleap-nn's
+  # `use_negative_frames` feature. Teaches the model not to hallucinate cells
+  # on background clutter (halos, dust, debris rings, ghost out-of-focus
+  # blobs). All frames are marked is_negative=True in the .slp.
+  #
+  # Sized to ~10% of positive frame count, spread across magnifications and
+  # SNR regimes so the model sees diverse "empty" environments. Per-frame
+  # jitter on optics/noise/bg_intensity gives wide visual variety in one set.
+  #
+  # In your sleap-nn training config, enable with:
+  #   data_config:
+  #     use_negative_frames: true
+  #     negative_loss_weight: 1.0
+  # ---------------------------------------------------------------------------
+
+  - name: 60x_negatives
+    mode: negative
+    n_frames: 600
+    clutter_level: [1.0, 2.5]              # mild-to-moderate clutter
+
+  - name: 20x_negatives
+    mode: negative
+    n_frames: 500
+    clutter_level: [1.0, 2.5]
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+
+  - name: 60x_negatives_dirty
+    mode: negative
+    n_frames: 300
+    clutter_level: [2.0, 4.0]              # heavy clutter — the trap setup
+    optics:
+      psf_sigma_um: 0.30
+      halo_strength: [0.8, 1.6]
+      halo_lowpass_sigma_um: [4.0, 7.0]
+    noise:
+      full_well_photons: [400, 1500]
+      read_noise_e: [4.0, 8.0]
+      bg_intensity: 0.55
+
+  - name: 60x_negatives_extreme_artifacts
+    mode: negative
+    n_frames: 200
+    clutter_level: [3.0, 5.0]              # cell-mimicking-artifact-rich
+    optics:
+      halo_strength: [1.0, 1.8]
+      halo_lowpass_sigma_um: [4.5, 7.0]
+
+  - name: 100x_negatives
+    mode: negative
+    n_frames: 200
+    clutter_level: [1.0, 3.0]
+    optics:
+      pixel_size_um: 0.065
+      psf_sigma_um: 0.10
+      halo_lowpass_sigma_um: 3.0

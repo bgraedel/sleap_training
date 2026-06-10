@@ -24,6 +24,10 @@ models/
 *.slp
 *.pkg.slp
 data/
+yolo_training/
+leish/predictions/
+leish/movies/
+leish/normalized_slps/
 
 # Large data files
 *.mp4
@@ -35,6 +39,9 @@ data/
 *.npz
 *.npy
 *.csv
+*.png
+*.mkv
+*.pickle
 
 # Logs and temporary files
 *.log

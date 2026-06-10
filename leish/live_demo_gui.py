@@ -101,6 +101,50 @@ PARASITE_GROUPS = {
         ("mode_switch_rate",         float, (0.0, 5.0)),
         ("mode_transition_duration", float, (0.0, 1.0)),
     ],
+    "Body density: organelles": [
+        ("nucleus_position",     float, (-1.0, 1.0)),
+        ("nucleus_strength",     float, (0.0, 1.5)),
+        ("nucleus_width",        float, (0.02, 0.5)),
+        ("kinetoplast_position", float, (-1.0, 1.0)),
+        ("kinetoplast_strength", float, (0.0, 1.5)),
+        ("kinetoplast_width",    float, (0.02, 0.3)),
+    ],
+    "Body density: cytoplasm": [
+        ("cytoplasm_mottle_strength", float, (0.0, 1.0)),
+        ("cytoplasm_mottle_scale",    float, (0.5, 8.0)),
+        ("cytoplasm_grain_strength",  float, (0.0, 0.6)),   # fine high-freq grain
+        ("cytoplasm_grain_scale",     float, (3.0, 25.0)),
+        ("body_texture_seed",         int,   (0, 1_000_000)),
+    ],
+    # High-magnification detail. Granules = dark dots; vacuoles = bright/clear
+    # spots; edge irregularity = lumpy outline; tip sharpness = pointier tips.
+    # Sizes are in µm, so they only become visible at small pixel_size_um
+    # (set ~0.065 for 100x in the Optics tab). density = mean count per cell.
+    "Body micro-texture (high-mag)": [
+        ("granule_density",        float, (0.0, 30.0)),
+        ("granule_strength",       float, (0.0, 1.0)),     # absorption depth 0..1
+        ("granule_size_um",        float, (0.05, 1.0)),    # um
+        ("vacuole_density",        float, (0.0, 15.0)),
+        ("vacuole_strength",       float, (0.0, 1.5)),
+        ("vacuole_size_um",        float, (0.1, 1.5)),     # um
+        ("whitedot_density",       float, (0.0, 40.0)),
+        ("whitedot_strength",      float, (0.0, 3.0)),     # brightness boost
+        ("whitedot_size_um",       float, (0.04, 0.4)),    # um (small)
+        ("body_edge_irregularity", float, (0.0, 0.3)),
+        ("tip_sharpness",          float, (0.0, 2.5)),
+        ("microtexture_seed",      int,   (0, 1_000_000)),
+    ],
+    "Second flagellum (dividing cells)": [
+        ("second_flagellum_length_scale",   float, (0.0, 1.0)),
+        ("second_flagellum_lateral_offset", float, (-2.0, 2.0)),   # um
+        ("second_flagellum_angle_offset",   float, (-0.4, 0.4)),   # rad
+        ("second_flagellum_phase_offset",   float, (-np.pi, np.pi)),
+    ],
+    "Body wobble (beat-driven)": [
+        ("body_lateral_wobble_amplitude", float, (0.0, 2.0)),         # um
+        ("body_yaw_wobble_amplitude",     float, (-0.5, 0.5)),        # rad
+        ("body_wobble_phase_lag",         float, (-np.pi, np.pi)),    # rad
+    ],
     "Pose": [
         ("center_x",         float, (0.0, 4096.0)),  # image px
         ("center_y",         float, (0.0, 4096.0)),  # image px
@@ -110,6 +154,54 @@ PARASITE_GROUPS = {
 
 BEAT_MODES   = ["tip_to_base", "base_to_tip", "static"]
 RENDER_MODES = ["fast", "accurate", "skip_noise"]
+
+# Kymograph (Wheeler 2020 Fig 2A,C). Tangent angle along the flagellum
+# (horizontal axis, base on the left, tip on the right) plotted over time
+# (vertical axis, oldest at the top, newest at the bottom -- as in the paper).
+# Yellow = positive tangent angle, cyan = negative, black = zero.
+KYMO_HISTORY_FRAMES = 200            # ~3 s of history at 60 fps
+KYMO_FLAG_SAMPLES   = 80             # samples along the flagellum
+KYMO_HEIGHT_PX      = 170            # display strip height in the GUI
+KYMO_THETA_MAX      = np.deg2rad(144)  # ±144° matches Fig 2's colour bar
+
+
+def _kymo_to_rgba(buf, vmax=KYMO_THETA_MAX, gamma=1.0):
+    """Map a tangent-angle buffer (radians) to a yellow/black/cyan RGBA image.
+
+    Parameters
+    ----------
+    vmax : float
+        Tangent angle (radians) that maps to fully saturated yellow/cyan.
+        Smaller -> higher contrast for low-amplitude beats.
+    gamma : float
+        Gamma applied to the normalised magnitude. >1 brightens the dim
+        parts of the kymograph (useful for the small angles of the
+        symmetric tip-to-base beat); <1 suppresses them.
+    """
+    if vmax <= 0:
+        vmax = 1e-6
+    norm = np.clip(buf / vmax, -1.0, 1.0)
+    if gamma != 1.0 and gamma > 0:
+        norm = np.sign(norm) * (np.abs(norm) ** (1.0 / gamma))
+    pos = np.maximum(norm, 0.0)
+    neg = np.maximum(-norm, 0.0)
+    rgba = np.empty((*buf.shape, 4), dtype=np.float32)
+    rgba[..., 0] = pos          # R: positive only -> yellow
+    rgba[..., 1] = pos + neg    # G: both
+    rgba[..., 2] = neg          # B: negative only -> cyan
+    rgba[..., 3] = 1.0
+    return rgba
+
+
+def _update_kymo_buffer(buf, theta_new):
+    """Scroll buffer up by one row, write the new tangent-angle profile at
+    the bottom. Newest data ends up at row -1, so when rendered as an image
+    time increases downward — matching the Wheeler 2020 Fig 2 convention."""
+    buf[:-1] = buf[1:]
+    n = min(theta_new.shape[0], buf.shape[1])
+    buf[-1, :n] = theta_new[:n]
+    if n < buf.shape[1]:
+        buf[-1, n:] = 0.0
 
 
 def _slider_tag(field): return f"par_slider__{field}"
@@ -247,9 +339,33 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
         "selected": 0, "apply_to_all": False, "highlight": True,
         "rebuild_bg": False, "reseed_all": False,
         "regen_schedule": False, "clear_schedule": False,
+        "division_stage": 0.5,
+        # Per-parasite-index snapshot of the cell BEFORE any division-stage
+        # modifications. Captured on "split into pair"; division_stage
+        # re-derives the cell from this base so it updates in real time.
+        "division_bases": {},
         "import_path": None, "export_path": None,
         "flash_msg": "", "flash_until": 0.0,
         "img_display_size": size,
+        # Rolling tangent-angle history for the selected parasite, fed to
+        # the kymograph widget. Time runs down the rows; distance along
+        # the flagellum runs across the columns (base on the left).
+        "kymo_buffer": np.zeros((KYMO_HISTORY_FRAMES, KYMO_FLAG_SAMPLES),
+                                dtype=np.float32),
+        # Kymograph colour mapping (user-adjustable via sliders).
+        "kymo_vmax_deg": float(np.rad2deg(KYMO_THETA_MAX)),  # ±deg at full saturation
+        "kymo_gamma":    1.0,                                # >1 brightens dim features
+        # Resizable layout state. split_x_frac is the fraction of the
+        # viewport width given to the left column (preview + kymograph);
+        # split_y_frac is the fraction of that column's height given to
+        # the main image. The user drags the 4-px gutters to resize.
+        "split_x_frac": 0.58,
+        "split_y_frac": 0.62,
+        "dragging":         None,    # None | "h" | "v"
+        "mouse_was_down":   False,
+        "splitter_x":       0,       # cached splitter pixel positions (set in _layout)
+        "splitter_y":       0,
+        "splitter_y_extent": 0,      # how far across the X axis the V-splitter runs
     }
 
     def flash(msg, dur=3.0):
@@ -270,6 +386,48 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
                 dpg.set_value(tag, v)
         if dpg.does_item_exist("par_beat_mode"):
             dpg.set_value("par_beat_mode", parasite.beat_mode)
+
+    def _apply_division(idx, save_base=False):
+        """(Re)compute parasites[idx] as a dividing cell from a stored base.
+
+        save_base=True (used by "split selected into pair"): snapshot the
+        current cell as the base, stripping any prior dividing fields so
+        re-applying division doesn't compound. The base is the cell as it
+        was *before* any division-stage transformation.
+
+        save_base=False (used by the live division sliders): re-derive from
+        the existing base. If no base exists yet (the cell isn't a divider),
+        nothing happens — the slider value is just stored for the next
+        button press.
+        """
+        if not (0 <= idx < len(parasites)):
+            return
+        bases = state["division_bases"]
+        # Only snapshot a base if none exists yet — otherwise pressing the
+        # button repeatedly would rebase on the already-widened cell and
+        # compound the division (body_width 2.0 -> 3.4 -> 5.78 -> ...).
+        if save_base and idx not in bases:
+            bases[idx] = dc.replace(
+                parasites[idx],
+                is_dividing_daughter=False,
+                second_flagellum_enabled=False,
+                second_flagellum_length_scale=1.0,
+                second_flagellum_lateral_offset=0.0,
+                second_flagellum_angle_offset=0.0,
+                second_flagellum_phase_offset=0.0,
+            )
+        if idx not in bases:
+            return
+        pair = L.make_dividing_pair(
+            bases[idx],
+            division_stage=state["division_stage"],
+            rng=rng,
+        )
+        parasites[idx] = pair[0]
+        # Mirror the new body_width / second_flagellum_* / organelle values
+        # into the per-field sliders so the user sees them update live.
+        if state["selected"] == idx:
+            refresh_parasite_sliders(parasites[idx])
 
     def resync_selector():
         items = [f"Parasite {i}" for i in range(max(len(parasites), 1))]
@@ -292,6 +450,14 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
         dpg.add_raw_texture(width=size, height=size, default_value=init,
                             tag="frame_tex", format=dpg.mvFormat_Float_rgba)
 
+        # Kymograph texture (small native size; scaled up at display time).
+        kymo_init = np.zeros(KYMO_HISTORY_FRAMES * KYMO_FLAG_SAMPLES * 4, dtype=np.float32)
+        kymo_init[3::4] = 1.0
+        dpg.add_raw_texture(width=KYMO_FLAG_SAMPLES, height=KYMO_HISTORY_FRAMES,
+                            default_value=kymo_init,
+                            tag="kymo_tex",
+                            format=dpg.mvFormat_Float_rgba)
+
     with dpg.file_dialog(directory_selector=False, show=False, tag="dlg_export",
                          callback=lambda s, a: state.update(export_path=a["file_path_name"]),
                          width=700, height=400):
@@ -304,17 +470,32 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
         dpg.add_file_extension(".*")
 
     # =========================================================================
-    # Preview window (image + status bar)
+    # Top-level windows. Three resizable panes:
+    #   preview_win  - main rendered image (top-left)
+    #   kymo_win     - tangent-angle kymograph (bottom-left)
+    #   ctrl_win     - tabbed controls (right column)
+    # plus a thin status bar at the bottom. The 4-px gutters between them
+    # are draggable splitters; see the mouse-handling block in the main
+    # render loop.
     # =========================================================================
     win_flags = dict(no_close=True, no_collapse=True, no_move=True,
                      no_resize=True, no_title_bar=True)
     with dpg.window(tag="preview_win", pos=(0, 0), **win_flags):
-        # Image sits in a child window so it can be centered/scrolled if needed
         with dpg.child_window(tag="preview_pane", border=False,
-                              height=-30, autosize_x=True):
+                              autosize_x=True, autosize_y=True):
             dpg.add_image("frame_tex", tag="frame_image",
                           width=size, height=size)
-        dpg.add_separator()
+
+    with dpg.window(tag="kymo_win", pos=(0, size), **win_flags):
+        with dpg.group(horizontal=True):
+            dpg.add_text("Tangent-angle kymograph (selected parasite)",
+                         color=(180, 180, 180))
+            dpg.add_text("yellow = +,  cyan = -,  black = 0",
+                         color=(140, 140, 140))
+        dpg.add_image("kymo_tex", tag="kymo_image",
+                      width=size, height=KYMO_HEIGHT_PX)
+
+    with dpg.window(tag="status_win", pos=(0, 0), **win_flags):
         dpg.add_text("", tag="status")
 
     # =========================================================================
@@ -359,10 +540,40 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
                                    callback=lambda: dpg.show_item("dlg_import"))
 
                 dpg.add_separator()
+                dpg.add_text("Kymograph display", color=(180, 180, 180))
+                dpg.add_slider_float(
+                    label="vmax (deg)", tag="kymo_vmax_slider",
+                    default_value=state["kymo_vmax_deg"],
+                    min_value=10.0, max_value=360.0, format="%.0f",
+                    callback=lambda s, a: state.update(kymo_vmax_deg=a))
+                dpg.add_slider_float(
+                    label="gamma", tag="kymo_gamma_slider",
+                    default_value=state["kymo_gamma"],
+                    min_value=0.3, max_value=3.0, format="%.2f",
+                    callback=lambda s, a: state.update(kymo_gamma=a))
+                dpg.add_text("  vmax: tangent angle (deg) at full saturation",
+                             color=(140, 140, 140))
+                dpg.add_text("  gamma: >1 brightens dim features",
+                             color=(140, 140, 140))
+
+                def _reset_kymo_display():
+                    state["kymo_vmax_deg"] = 144.0
+                    state["kymo_gamma"]    = 1.0
+                    if dpg.does_item_exist("kymo_vmax_slider"):
+                        dpg.set_value("kymo_vmax_slider", 144.0)
+                    if dpg.does_item_exist("kymo_gamma_slider"):
+                        dpg.set_value("kymo_gamma_slider", 1.0)
+
+                dpg.add_button(label="reset (144 deg, gamma 1.0)",
+                               callback=_reset_kymo_display)
+
+                dpg.add_separator()
                 dpg.add_text("Keyboard shortcuts", color=(160, 160, 160))
                 dpg.add_text("  Space  - pause / resume", color=(140, 140, 140))
                 dpg.add_text("  R      - reseed all parasites", color=(140, 140, 140))
                 dpg.add_text("  B      - rebuild background", color=(140, 140, 140))
+                dpg.add_text("Drag the 4-px gutters between panes to resize.",
+                             color=(140, 140, 140))
 
             # -------------------------- Optics & Noise ------------------------
             with dpg.tab(label="Optics & Noise"):
@@ -394,6 +605,8 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
                         idx = int(a.split()[1])
                     except (ValueError, IndexError):
                         return
+                    if idx != state["selected"]:
+                        state["kymo_buffer"][:] = 0.0  # discard previous cell's history
                     state["selected"] = idx
                     if 0 <= idx < len(parasites):
                         refresh_parasite_sliders(parasites[idx])
@@ -460,35 +673,91 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
                                     format="%.3g",
                                     user_data=field, callback=par_cb)
 
+                # Dividing cells: model the dominant pre-cytokinesis stage
+                # (one rounder body, two flagella from the same anterior end;
+                # Wheeler 2011, 2013). Press "split selected into pair" to
+                # snapshot the current cell as a base, then the division_stage
+                # slider live-modifies the cell from that base. Fine control
+                # of body width / bend / nF length etc. lives in the per-field
+                # sliders above (Body / Second flagellum / Body density).
+                with dpg.collapsing_header(label="Dividing cells"):
+                    def _on_stage(sender, app_data):
+                        state["division_stage"] = app_data
+                        idx = state["selected"]
+                        if idx in state["division_bases"]:
+                            _apply_division(idx, save_base=False)
+                    dpg.add_slider_float(
+                        label="division_stage",
+                        default_value=state["division_stage"],
+                        min_value=0.0, max_value=1.0, format="%.2f",
+                        callback=_on_stage)
+                    dpg.add_button(
+                        label="split selected into pair",
+                        callback=lambda: _apply_division(state["selected"],
+                                                        save_base=True))
+                    dpg.add_text("(button snapshots current params as base;"
+                                 " division_stage then live-modifies from it.",
+                                 color=(160, 160, 160))
+                    dpg.add_text(" Fine control: use Body / Second flagellum"
+                                 " / Body density sliders above.)",
+                                 color=(160, 160, 160))
+
     # --- viewport, theme, layout, keys ---
     dpg.create_viewport(title="Leishmania live preview",
-                        width=size + 500, height=size + 100,
-                        min_width=600, min_height=400)
+                        width=size + 700, height=size + 140,
+                        min_width=720, min_height=440)
 
     theme = _build_theme()
     dpg.bind_theme(theme)
 
+    GUTTER    = 4       # px between panes (the draggable splitter zone)
+    HIT_TOL   = 6       # px tolerance around a splitter line that counts as a grab
+    STATUS_H  = 26      # px
+
     def _layout():
-        """Re-layout both windows + rescale the rendered image to fit."""
+        """Re-layout the three panes + status bar from state-driven fractions.
+        Also caches the splitter line positions so the mouse handler in the
+        render loop can hit-test them."""
         vw = dpg.get_viewport_client_width()
         vh = dpg.get_viewport_client_height()
 
-        ctrl_w   = max(360, min(500, int(vw * 0.40)))
-        preview_w = max(220, vw - ctrl_w)
+        # Horizontal split: left column (preview + kymo) vs right column (controls).
+        preview_col_w = int(vw * state["split_x_frac"])
+        preview_col_w = max(260, min(preview_col_w, vw - 300))
+        ctrl_w        = max(280, vw - preview_col_w - GUTTER)
+
+        # Vertical split inside the left column: main image vs kymograph.
+        usable_h = max(200, vh - STATUS_H - GUTTER)
+        main_h   = int(usable_h * state["split_y_frac"])
+        main_h   = max(140, min(main_h, usable_h - 120))
+        kymo_h   = max(80, usable_h - main_h - GUTTER)
 
         dpg.configure_item("preview_win", pos=(0, 0),
-                           width=preview_w, height=vh)
-        dpg.configure_item("ctrl_win", pos=(preview_w, 0),
-                           width=ctrl_w, height=vh)
+                           width=preview_col_w, height=main_h)
+        dpg.configure_item("kymo_win",    pos=(0, main_h + GUTTER),
+                           width=preview_col_w, height=kymo_h)
+        dpg.configure_item("ctrl_win",    pos=(preview_col_w + GUTTER, 0),
+                           width=ctrl_w, height=vh - STATUS_H)
+        dpg.configure_item("status_win",  pos=(0, vh - STATUS_H),
+                           width=vw, height=STATUS_H)
 
-        # Fit image into the preview pane (square, aspect preserved).
-        # Reserve a small margin for window padding + the status row.
-        avail_w = preview_w - 24
-        avail_h = vh - 70
-        avail = max(64, min(avail_w, avail_h))
+        # Resize the image widgets inside the panes.
+        main_avail_w = preview_col_w - 24
+        main_avail_h = main_h - 24
+        main_size    = max(64, min(main_avail_w, main_avail_h))
         if dpg.does_item_exist("frame_image"):
-            dpg.configure_item("frame_image", width=avail, height=avail)
-        state["img_display_size"] = avail
+            dpg.configure_item("frame_image", width=main_size, height=main_size)
+
+        kymo_disp_w = max(64, preview_col_w - 24)
+        kymo_disp_h = max(48, kymo_h - 48)   # leave room for the title row
+        if dpg.does_item_exist("kymo_image"):
+            dpg.configure_item("kymo_image", width=kymo_disp_w, height=kymo_disp_h)
+
+        # Cache splitter positions for hit testing.
+        state["img_display_size"]   = main_size
+        state["splitter_x"]         = preview_col_w + GUTTER // 2     # H-splitter (full height)
+        state["splitter_y"]         = main_h + GUTTER // 2            # V-splitter (left column only)
+        state["splitter_y_extent"]  = preview_col_w                   # H-extent of V-splitter
 
     dpg.set_viewport_resize_callback(_layout)
 
@@ -513,16 +782,56 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
     dpg.show_viewport()
     _layout()  # initial layout pass
 
+    def _check_splitter_hit(mx, my):
+        """Return 'h', 'v', or None if (mx, my) lies on a splitter line."""
+        sx = state["splitter_x"]
+        sy = state["splitter_y"]
+        sy_extent = state["splitter_y_extent"]
+        vh = dpg.get_viewport_client_height()
+        # Horizontal splitter (vertical line at x = sx; full height)
+        if abs(mx - sx) <= HIT_TOL and 0 <= my <= vh - STATUS_H:
+            return "h"
+        # Vertical splitter (horizontal line at y = sy; only across the left column)
+        if abs(my - sy) <= HIT_TOL and 0 <= mx <= sy_extent:
+            return "v"
+        return None
+
     # --- Render loop ---
     frame_times = []
     while dpg.is_dearpygui_running():
         loop_start = time.perf_counter()
+
+        # ---- Splitter drag: poll mouse state each frame (no widget conflict
+        # because the splitter zones are 4-px gaps with no widgets in them).
+        mouse_down = dpg.is_mouse_button_down(0)
+        mx, my     = dpg.get_mouse_pos(local=False)
+
+        if mouse_down and not state["mouse_was_down"]:
+            # Mouse just went down: see if the press landed on a splitter.
+            state["dragging"] = _check_splitter_hit(mx, my)
+
+        if mouse_down and state["dragging"]:
+            vw_now = dpg.get_viewport_client_width()
+            vh_now = dpg.get_viewport_client_height()
+            if state["dragging"] == "h":
+                state["split_x_frac"] = max(0.18, min(0.85, mx / max(vw_now, 1)))
+                _layout()
+            elif state["dragging"] == "v":
+                usable_h = max(1, vh_now - STATUS_H - GUTTER)
+                state["split_y_frac"] = max(0.15, min(0.85, my / usable_h))
+                _layout()
+
+        if not mouse_down:
+            state["dragging"] = None
+        state["mouse_was_down"] = mouse_down
 
         # Structural changes
         if state["reseed_all"]:
             parasites[:] = [_make_parasite(rng, shape)
                             for _ in range(state["n_parasites"])]
             state["reseed_all"] = False
+            state["kymo_buffer"][:] = 0.0
+            state["division_bases"].clear()
             resync_selector()
         else:
             changed = False
@@ -531,8 +840,13 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
                 changed = True
             if len(parasites) > state["n_parasites"]:
                 del parasites[state["n_parasites"]:]
+                # Drop stale division-base snapshots for removed indices.
+                for k in [k for k in state["division_bases"]
+                          if k >= state["n_parasites"]]:
+                    del state["division_bases"][k]
                 changed = True
             if changed:
+                state["kymo_buffer"][:] = 0.0
                 resync_selector()
 
         if state["rebuild_bg"]:
@@ -573,6 +887,7 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
                 state["n_parasites"] = len(parasites)
                 background = L.synthetic_background(shape, rng,
                                                     intensity=noise.bg_intensity)
+                state["kymo_buffer"][:] = 0.0
                 resync_selector()
                 flash(f"Imported {state['import_path']}")
             except Exception as e:
@@ -586,16 +901,20 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
             mode = state["mode"]
             if mode == "skip_noise":
                 phase = np.zeros(shape, dtype=np.float32)
+                transmission = np.ones(shape, dtype=np.float32)
                 for p in parasites:
-                    tile, (y0, x0), _ = L.render_parasite_phase(
+                    tile, (y0, x0), _, transm = L.render_parasite_phase(
                         p, state["t"], shape, optics=optics)
                     if tile is None:
                         continue
                     th, tw = tile.shape
                     np.maximum(phase[y0:y0+th, x0:x0+tw], tile,
                                out=phase[y0:y0+th, x0:x0+tw])
+                    if transm is not None:
+                        ar = transmission[y0:y0+th, x0:x0+tw]
+                        np.multiply(ar, transm, out=ar)
                 intensity = L.simulate_phase_contrast_fast(phase, optics)
-                img = np.clip(background * intensity, 0, 1)
+                img = np.clip(background * intensity * transmission, 0, 1)
             else:
                 img, _ = L.render_scene(
                     parasites, state["t"], shape, optics, noise,
@@ -604,6 +923,25 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
             L.advance_parasites(parasites, dt, shape, periodic=True,
                                 t=state["t"], optics=optics)
             state["t"] += dt
+
+            # --- Kymograph: record selected parasite's tangent-angle profile.
+            # beat_tangent_angle returns cell-frame tangent angles, exactly
+            # what Wheeler 2020 Fig 2 plots. We sample BEFORE the next
+            # state["t"] update so the row aligns with the rendered frame.
+            if parasites:
+                sel = min(state["selected"], len(parasites) - 1)
+                try:
+                    _, theta = L.beat_tangent_angle(parasites[sel], state["t"],
+                                                   n_points=KYMO_FLAG_SAMPLES)
+                    _update_kymo_buffer(state["kymo_buffer"], theta.astype(np.float32))
+                except Exception:
+                    pass
+            kymo_rgba = _kymo_to_rgba(
+                state["kymo_buffer"],
+                vmax=np.deg2rad(state["kymo_vmax_deg"]),
+                gamma=state["kymo_gamma"],
+            )
+            dpg.set_value("kymo_tex", kymo_rgba.ravel())
 
             tex = np.empty((size, size, 4), dtype=np.float32)
             tex[..., 0] = img
@@ -640,9 +978,9 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--size", type=int, default=512)
-    ap.add_argument("--n", type=int, default=4)
-    ap.add_argument("--fps", type=float, default=60.0)
-    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--size", type=int, default=640)
+    ap.add_argument("--n", type=int, default=1)
+    ap.add_argument("--fps", type=float, default=240.0)
+    ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
     run(size=args.size, n_parasites=args.n, target_fps=args.fps, seed=args.seed)

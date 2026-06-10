@@ -21,7 +21,7 @@ import sys
 
 
 def cmd_list(root: Path) -> None:
-    slps = sorted(root.rglob("labels.slp"))
+    slps = sorted(root.rglob("*.slp"))
     if not slps:
         sys.exit(f"No labels.slp files found under {root}")
     print(f"# {len(slps)} labels.slp files found under {root}")
@@ -42,7 +42,7 @@ def cmd_merge(root: Path, output: Path) -> None:
     """
     import sleap_io as sio
 
-    slps = sorted(root.rglob("labels.slp"))
+    slps = sorted(root.rglob("*.slp"))
     if not slps:
         sys.exit(f"No labels.slp files found under {root}")
 

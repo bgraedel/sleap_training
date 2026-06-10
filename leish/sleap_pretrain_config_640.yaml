@@ -1,0 +1,304 @@
+# =============================================================================
+# Synthetic Leishmania dataset for SLEAP pretraining — NATIVE 640x640 TILES
+# =============================================================================
+#
+# 640 variant of sleap_pretrain_config.yaml, with a REDUCED frame budget.
+# Frames are rendered natively at 640 px (a single inference TILE), not
+# downscaled from 1024, so thin flagella keep full per-pixel width.
+#
+# Reduced size rationale: pose models train on INSTANCES, not frames, and each
+# tile holds many cells; with per-frame jitter every frame is a distinct
+# "session", so easy/common configs saturate fast. Budget is cut on the big
+# main/dense pools and kept on the hard tails (very-dense crossings, low SNR,
+# dividing cells, 100x, negatives). Tune via a learning curve on REAL/human
+# val frames, not synthetic val. ~3,300 positive frames + short clips + ~310
+# negatives.
+#
+# TWO-FLAGELLUM skeleton: dividing cells (one body, two flagella) get a second
+# keypoint chain (Flag2_1..Flag2_5, Tip2) branching from the shared Base;
+# single-flagellum cells leave those nodes unlabelled (NaN). Skeleton total:
+#   Head, Base, Flag1..Flag5, Tip, Flag2_1..Flag2_5, Tip2 = 14 nodes.
+# NOTE: different skeleton from the old 8-node config, so a prior 8-node
+# checkpoint is not fine-tunable on it. For the old behaviour set
+# skeleton.second_flagellum: false (or dividing_fraction: 0).
+#
+# Run with:
+#   python dataset_builder.py multi sleap_pretrain_config_640.yaml
+# =============================================================================
+
+output_dir: data/leishmania_pretrain_640_keypoints
+mode: random
+seed: 42
+
+# --- Defaults applied to every setup unless overridden ---
+
+n_frames: 1500
+image_shape: [640, 640]            # native tile size
+
+# Two-flagellum skeleton, explicit. n_flagellum_interior drives BOTH the node
+# count and the renderer's per-cell keypoint count, so they stay in sync.
+skeleton:
+  n_flagellum_interior: 5
+  second_flagellum: true
+
+dividing_fraction: 0.05            # baseline; division-heavy setups raise to 0.2
+
+fast: true
+video_format: mp4
+embed_frames: true
+per_frame_jitter: true
+
+# Video-mode defaults (n_parasites scaled ~0.39x for the 640 field of view)
+fps: 60.0
+n_parasites: 10
+periodic_boundary: true
+
+# Random-mode defaults (counts scaled ~0.39x vs the 1024 config)
+parasites_per_frame: [4, 11]
+bg_intensity_range: [0.25, 0.95]
+clutter_level: [0.8, 2.0]
+
+save_frames: all
+
+# Optics: 60x defaults; per-setup overrides set other magnifications.
+# pixel_size_um is UNCHANGED from the 1024 config (cell scale is preserved).
+optics:
+  pixel_size_um: 0.108
+  psf_sigma_um: 0.13
+  halo_strength: [0.25, 1.40]
+  halo_lowpass_sigma_um: [2.5, 6.5]
+  intensity_gain: [0.45, 1.00]
+  shadeoff_threshold: [0.60, 0.92]
+  shadeoff_strength: [0.05, 0.30]
+  body_edge_smooth_sigma_um: [0.15, 0.55]
+
+noise:
+  full_well_photons: [600, 4500]
+  read_noise_e: [1.5, 6.0]
+  bg_intensity: 0.7
+  dark_offset: -0.05
+
+
+# =============================================================================
+# Setups  (parasites_per_frame scaled by ~0.39 for the 640 field of view)
+# =============================================================================
+
+setups:
+
+  # --- PRIMARY 20x and 60x random pools (trimmed hard) ---------------------
+  - name: 20x_main
+    n_frames: 500
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [5, 17]
+
+  - name: 60x_main
+    n_frames: 500
+    parasites_per_frame: [2, 8]
+
+  # --- DIVISION-HEAVY pools (extra second-flagellum coverage) --------------
+  - name: 20x_high_division
+    n_frames: 300
+    dividing_fraction: 0.2
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [5, 17]
+
+  - name: 60x_high_division
+    n_frames: 300
+    dividing_fraction: 0.2
+    parasites_per_frame: [2, 8]
+
+  # --- DENSITY VARIATIONS --------------------------------------------------
+  - name: 20x_dense
+    n_frames: 200
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [17, 38]
+
+  - name: 60x_dense
+    n_frames: 200
+    parasites_per_frame: [8, 17]
+
+  # --- VERY DENSE — crossing flagella / heavy overlap (hard tail) ----------
+  - name: 20x_very_dense
+    n_frames: 100
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [70, 139]
+
+  - name: 60x_very_dense
+    n_frames: 100
+    parasites_per_frame: [28, 55]
+
+  # --- LIGHTING VARIATIONS (dimmer baseline) -------------------------------
+  - name: 20x_dimmer
+    n_frames: 150
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    noise:
+      full_well_photons: 1500
+      read_noise_e: 5
+      bg_intensity: 0.55
+    bg_intensity_range: [0.45, 0.65]
+    parasites_per_frame: [5, 17]
+
+  - name: 60x_dimmer
+    n_frames: 150
+    noise:
+      full_well_photons: 1500
+      read_noise_e: 5
+      bg_intensity: 0.55
+    bg_intensity_range: [0.45, 0.65]
+    parasites_per_frame: [2, 8]
+
+  # --- EXTREME LOW SNR (hard tail) -----------------------------------------
+  - name: 20x_low_snr
+    n_frames: 120
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    noise:
+      full_well_photons: 500
+      read_noise_e: 7
+      bg_intensity: 0.40
+      dark_offset: -0.05
+    bg_intensity_range: [0.25, 0.55]
+    parasites_per_frame: [5, 17]
+
+  - name: 60x_low_snr
+    n_frames: 120
+    noise:
+      full_well_photons: 500
+      read_noise_e: 7
+      bg_intensity: 0.40
+      dark_offset: -0.05
+    bg_intensity_range: [0.25, 0.55]
+    parasites_per_frame: [2, 8]
+
+  # --- FOCUS VARIATIONS ----------------------------------------------------
+  - name: 20x_defocused
+    n_frames: 150
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.55
+      halo_strength: 1.0
+      halo_lowpass_sigma_um: 6.0
+    parasites_per_frame: [5, 17]
+
+  - name: 60x_defocused
+    n_frames: 150
+    optics:
+      psf_sigma_um: 0.30
+      halo_strength: 1.0
+      halo_lowpass_sigma_um: 5.5
+    parasites_per_frame: [2, 8]
+
+  - name: 60x_strong_organelles
+    optics:
+      pixel_size_um: 0.325
+    n_frames: 250
+    organelle_prob: 1.0           # every cell shows nucleus + kinetoplast
+    cytoplasm_mottle_prob: 0.9    # almost every cell shows mottling
+    parasites_per_frame: [2, 8]
+
+  - name: 20x_strong_organelles
+    n_frames: 250
+    organelle_prob: 1.0           # every cell shows nucleus + kinetoplast
+    cytoplasm_mottle_prob: 0.9    # almost every cell shows mottling
+    parasites_per_frame: [2, 8]
+
+  # --- OFF-MAGNIFICATION ---------------------------------------------------
+  - name: 40x_intermediate
+    n_frames: 150
+    optics:
+      pixel_size_um: 0.163
+      psf_sigma_um: 0.20
+      halo_lowpass_sigma_um: 3.5
+    parasites_per_frame: [4, 12]
+
+  - name: 100x_detail
+    n_frames: 100
+    optics:
+      pixel_size_um: 0.065
+      psf_sigma_um: 0.10
+      halo_lowpass_sigma_um: 3.0
+    parasites_per_frame: [1, 4]
+
+  # --- SHORT VIDEO CLIPS for tracking-model pretraining --------------------
+  # repeats: 12 -> 12 independent ~1.5s clips, per-clip optics/noise drift.
+  - name: 20x_short_clips
+    mode: video
+    n_frames: 90
+    fps: 60.0
+    n_parasites: 10
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    repeats: 12
+    save_frames: {every_n: 5}
+
+  - name: 60x_short_clips
+    mode: video
+    n_frames: 90
+    fps: 60.0
+    n_parasites: 5
+    repeats: 12
+    save_frames: {every_n: 5}
+
+  # --- NEGATIVE FRAMES (empty/clutter-only; ~10% of positives) -------------
+  - name: 60x_negatives
+    mode: negative
+    n_frames: 90
+    clutter_level: [1.0, 2.5]
+
+  - name: 20x_negatives
+    mode: negative
+    n_frames: 80
+    clutter_level: [1.0, 2.5]
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+
+  - name: 60x_negatives_dirty
+    mode: negative
+    n_frames: 60
+    clutter_level: [2.0, 4.0]
+    optics:
+      psf_sigma_um: 0.30
+      halo_strength: [0.8, 1.6]
+      halo_lowpass_sigma_um: [4.0, 7.0]
+    noise:
+      full_well_photons: [400, 1500]
+      read_noise_e: [4.0, 8.0]
+      bg_intensity: 0.55
+
+  - name: 60x_negatives_extreme_artifacts
+    mode: negative
+    n_frames: 40
+    clutter_level: [3.0, 5.0]
+    optics:
+      halo_strength: [1.0, 1.8]
+      halo_lowpass_sigma_um: [4.5, 7.0]
+
+  - name: 100x_negatives
+    mode: negative
+    n_frames: 40
+    clutter_level: [1.0, 3.0]
+    optics:
+      pixel_size_um: 0.065
+      psf_sigma_um: 0.10
+      halo_lowpass_sigma_um: 3.0

@@ -1,0 +1,613 @@
+# =============================================================================
+# Synthetic Leishmania SEGMENTATION dataset — NATIVE 640x640 TILES — ~20k SCALE
+# =============================================================================
+#
+# Scaled-up variant of `segmentation_config_640.yaml`.
+#
+# WHAT CHANGED vs the base 640 config
+#   - Total volume raised from ~7.4k -> ~20.6k frames (~18.5k train after the
+#     0.1 val split). Normal setups scaled ~2.2x.
+#   - DIRT / CLUTTER / ARTEFACT frames boosted ~4x AND extended with new
+#     combination setups (dirt x dense, dirt x very-dense, dirty negatives at
+#     every magnification, extra extreme-artifact negatives). Their share of the
+#     dataset rises from ~11% to ~26% — these are the hardest cases (debris /
+#     hairs / bubbles overlapping cells, grimy low-SNR, heavy clutter) and the
+#     ones the model most needs more of.
+#   - Everything else (optics, noise, microtexture, anchors, magnification grid,
+#     densities, division, organelles, textured high-mag, negatives) is
+#     UNCHANGED — only `n_frames` per setup and the output dirs differ, plus the
+#     added dirty/complex setups.
+#
+# Rationale: a transformer segmenter (Mask2Former) is data-hungry; more unique
+# frames (each is freshly domain-randomised via `mode: random` + per-frame
+# jitter, so higher n_frames = more variety, not duplicates) + a heavier tail of
+# the most complex/dirty conditions is the cheapest lever we control. Train in
+# image-views/steps, not epochs: ~20k @ ~52 epochs ~= 7k @ 150 epochs in compute.
+#
+# Same native-640 tiling / inference notes as the base config (tile large real
+# frames into overlapping 640 windows; merge across tiles).
+#
+# Run with:
+#   python segmentation_dataset_creator.py multi segmentation_config_640_20k.yaml
+# =============================================================================
+
+output_dir: m2f_20k/data/leishmania_seg_640_division_20k          # required key; builder uses seg_output_dir
+seg_output_dir: m2f_20k/data/leishmania_seg_ds_640_division_20k   # <- 20k dataset lands here (separate from 7k)
+
+# --- Segmentation-specific options ---
+seg_yolo_classes: all            # single-class animal instance seg (stage 1)
+seg_val_fraction: 0.1
+seg_min_visible_frac: 0.05
+seg_min_polygon_area: 6.0
+
+mode: random
+seed: 42
+
+# --- Defaults applied to every setup unless overridden ---
+
+n_frames: 1500
+image_shape: [640, 640]             # <- native tile size
+fast: true
+per_frame_jitter: true
+
+# Random-mode defaults (counts scaled ~0.39x vs the 1024 config)
+parasites_per_frame: [4, 11]
+bg_intensity_range: [0.25, 0.95]
+clutter_level: [0.8, 2.0]
+
+save_frames: all
+
+# Optics: 60x defaults; per-setup overrides set other magnifications.
+# pixel_size_um is UNCHANGED from the 1024 config (cell scale is preserved).
+optics:
+  pixel_size_um: 0.108
+  psf_sigma_um: 0.13
+  halo_strength: [0.25, 1.40]
+  halo_lowpass_sigma_um: [2.5, 6.5]
+  intensity_gain: [0.45, 1.00]
+  shadeoff_threshold: [0.60, 0.92]
+  shadeoff_strength: [0.05, 0.30]
+  body_edge_smooth_sigma_um: [0.15, 0.55]
+
+noise:
+  full_well_photons: [600, 4500]
+  read_noise_e: [1.5, 6.0]
+  bg_intensity: 0.7
+  dark_offset: -0.05
+
+
+# =============================================================================
+# Setups  (parasites_per_frame scaled by ~0.39 for the 640 field of view)
+# Normal setups ~2.2x the base 640 counts; dirt/clutter/artefact setups ~4x +
+# new combinations (see the DIRTY section).
+# =============================================================================
+
+setups:
+
+  # --- PRIMARY 20x and 60x random pools ------------------------------------
+  - name: 20x_main
+    n_frames: 880
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [5, 17]
+
+  - name: 20x_high_division_rate
+    n_frames: 770
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    dividing_fraction: 0.2
+    parasites_per_frame: [5, 17]
+
+  - name: 60x_main
+    n_frames: 880
+    parasites_per_frame: [2, 8]
+
+  - name: 60x_high_division_rate
+    n_frames: 770
+    dividing_fraction: 0.2
+    parasites_per_frame: [2, 8]
+
+  # --- DENSITY VARIATIONS --------------------------------------------------
+  - name: 20x_dense
+    n_frames: 440
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [17, 38]
+
+  - name: 60x_dense
+    n_frames: 440
+    parasites_per_frame: [8, 17]
+
+  # --- VERY DENSE - crossing flagella / heavy overlap within a tile.
+  # NOTE: raise ultralytics `max_det` (e.g. 1000) / M2F `--num-queries` so dense
+  # tiles aren't truncated.
+  - name: 20x_very_dense
+    n_frames: 300
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [70, 139]
+
+  - name: 60x_very_dense
+    n_frames: 300
+    parasites_per_frame: [28, 55]
+
+  # --- LIGHTING VARIATIONS (dimmer baseline) -------------------------------
+  - name: 20x_dimmer
+    n_frames: 330
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    noise:
+      full_well_photons: 1500
+      read_noise_e: 5
+      bg_intensity: 0.55
+    bg_intensity_range: [0.45, 0.65]
+    parasites_per_frame: [5, 17]
+
+  - name: 60x_dimmer
+    n_frames: 330
+    noise:
+      full_well_photons: 1500
+      read_noise_e: 5
+      bg_intensity: 0.55
+    bg_intensity_range: [0.45, 0.65]
+    parasites_per_frame: [2, 8]
+
+  # --- EXTREME LOW SNR - grainy, marginal acquisition ----------------------
+  - name: 20x_low_snr
+    n_frames: 360
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    noise:
+      full_well_photons: 500
+      read_noise_e: 7
+      bg_intensity: 0.40
+      dark_offset: -0.05
+    bg_intensity_range: [0.25, 0.55]
+    parasites_per_frame: [5, 17]
+
+  - name: 60x_low_snr
+    n_frames: 360
+    noise:
+      full_well_photons: 500
+      read_noise_e: 7
+      bg_intensity: 0.40
+      dark_offset: -0.05
+    bg_intensity_range: [0.25, 0.55]
+    parasites_per_frame: [2, 8]
+
+  # --- FOCUS VARIATIONS (inflated PSF; jitter widens further) --------------
+  - name: 20x_defocused
+    n_frames: 330
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.55
+      halo_strength: 1.0
+      halo_lowpass_sigma_um: 6.0
+    parasites_per_frame: [5, 17]
+
+  - name: 60x_defocused
+    n_frames: 330
+    optics:
+      psf_sigma_um: 0.30
+      halo_strength: 1.0
+      halo_lowpass_sigma_um: 5.5
+    parasites_per_frame: [2, 8]
+
+  # --- BODY PATTERNING VARIATIONS ------------------------------------------
+  # Cells with strongly visible nucleus + kinetoplast and prominent cytoplasm
+  # mottling. Forces the segmenter to learn that the internal dark patches
+  # are part of the body, not separate objects / occluders.
+  - name: 20x_strong_organelles
+    n_frames: 440
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    organelle_prob: 1.0           # every cell shows nucleus + kinetoplast
+    cytoplasm_mottle_prob: 0.9    # almost every cell shows mottling
+    parasites_per_frame: [5, 17]
+
+  - name: 60x_strong_organelles
+    n_frames: 440
+    organelle_prob: 1.0           # every cell shows nucleus + kinetoplast
+    cytoplasm_mottle_prob: 0.9    # almost every cell shows mottling
+    parasites_per_frame: [2, 8]
+
+  # --- OFF-MAGNIFICATION ---------------------------------------------------
+  # --- 40x GRID -----------------------------------------------------------
+  - name: 40x_intermediate
+    n_frames: 330
+    optics: &optics_40x
+      pixel_size_um: 0.163
+      psf_sigma_um: 0.20
+      halo_lowpass_sigma_um: 3.5
+    parasites_per_frame: [4, 13]
+
+  - name: 40x_high_division_rate
+    n_frames: 440
+    optics: *optics_40x
+    dividing_fraction: 0.2
+    parasites_per_frame: [4, 13]
+
+  - name: 40x_dense
+    n_frames: 330
+    optics: *optics_40x
+    parasites_per_frame: [12, 28]
+
+  - name: 40x_very_dense
+    n_frames: 240
+    optics: *optics_40x
+    parasites_per_frame: [45, 95]
+
+  - name: 40x_dimmer
+    n_frames: 260
+    optics: *optics_40x
+    noise:
+      full_well_photons: 1500
+      read_noise_e: 5
+      bg_intensity: 0.55
+    bg_intensity_range: [0.45, 0.65]
+    parasites_per_frame: [4, 13]
+
+  - name: 40x_low_snr
+    n_frames: 300
+    optics: *optics_40x
+    noise:
+      full_well_photons: 500
+      read_noise_e: 7
+      bg_intensity: 0.40
+      dark_offset: -0.05
+    bg_intensity_range: [0.25, 0.55]
+    parasites_per_frame: [4, 13]
+
+  - name: 40x_defocused
+    n_frames: 260
+    optics:
+      pixel_size_um: 0.163
+      psf_sigma_um: 0.35
+      halo_strength: 1.0
+      halo_lowpass_sigma_um: 5.0
+    parasites_per_frame: [4, 13]
+
+  - name: 40x_strong_organelles
+    n_frames: 330
+    optics: *optics_40x
+    organelle_prob: 1.0
+    cytoplasm_mottle_prob: 0.9
+    parasites_per_frame: [4, 13]
+
+  # --- 100x GRID ----------------------------------------------------------
+  - name: 100x_detail
+    n_frames: 220
+    optics: &optics_100x
+      pixel_size_um: 0.065
+      psf_sigma_um: 0.10
+      halo_lowpass_sigma_um: 3.0
+    parasites_per_frame: [1, 4]
+
+  - name: 100x_high_division_rate
+    n_frames: 220
+    optics: *optics_100x
+    dividing_fraction: 0.2
+    parasites_per_frame: [1, 4]
+
+  - name: 100x_dimmer
+    n_frames: 220
+    optics: *optics_100x
+    noise:
+      full_well_photons: 1500
+      read_noise_e: 5
+      bg_intensity: 0.55
+    bg_intensity_range: [0.45, 0.65]
+    parasites_per_frame: [1, 4]
+
+  - name: 100x_low_snr
+    n_frames: 300
+    optics: *optics_100x
+    noise:
+      full_well_photons: 500
+      read_noise_e: 7
+      bg_intensity: 0.40
+      dark_offset: -0.05
+    bg_intensity_range: [0.25, 0.55]
+    parasites_per_frame: [1, 4]
+
+  - name: 100x_defocused
+    n_frames: 220
+    optics:
+      pixel_size_um: 0.065
+      psf_sigma_um: 0.25
+      halo_strength: 1.0
+      halo_lowpass_sigma_um: 4.0
+    parasites_per_frame: [1, 4]
+
+  - name: 100x_strong_organelles
+    n_frames: 260
+    optics: *optics_100x
+    organelle_prob: 1.0
+    cytoplasm_mottle_prob: 0.9
+    parasites_per_frame: [1, 4]
+
+  # ===========================================================================
+  # TEXTURED HIGH-MAG (60x + 100x + 40x) — the tuned `.json` look.
+  # ===========================================================================
+
+  - name: 100x_textured_sparse
+    n_frames: 440
+    microtexture_prob: 1.0
+    parasites_per_frame: [1, 2]
+    optics: &tex_optics_100x
+      pixel_size_um: 0.0621
+      psf_sigma_um: 0.227
+      halo_strength: [1.60, 2.05]
+      halo_lowpass_sigma_um: 0.603
+      intensity_gain: [0.30, 0.37]
+      shadeoff_threshold: 1.59
+      shadeoff_strength: [0.24, 0.33]
+      body_edge_smooth_sigma_um: 0.05
+    microtexture: &tex_micro
+      granule_density:          [0, 35]
+      granule_strength:         [0.40, 0.80]
+      granule_size_um:          [0.18, 0.36]
+      vacuole_density:          [0, 18]
+      vacuole_strength:         [0.40, 0.80]
+      vacuole_size_um:          [0.35, 0.60]
+      whitedot_density:         [5, 45]
+      whitedot_strength:        [0.70, 1.60]
+      whitedot_size_um:         [0.07, 0.13]
+      cytoplasm_grain_strength: [0.20, 0.65]
+      cytoplasm_grain_scale:    [12.0, 24.0]
+      body_edge_irregularity:   [0.01, 0.08]
+      tip_sharpness:            [0.40, 1.40]
+
+  - name: 100x_textured_dense
+    n_frames: 440
+    microtexture_prob: 1.0
+    parasites_per_frame: [2, 5]
+    optics: *tex_optics_100x
+    microtexture: *tex_micro
+
+  - name: 100x_textured_very_dense
+    n_frames: 260
+    microtexture_prob: 1.0
+    parasites_per_frame: [5, 10]
+    optics: *tex_optics_100x
+    microtexture: *tex_micro
+
+  - name: 60x_textured_sparse
+    n_frames: 440
+    microtexture_prob: 1.0
+    parasites_per_frame: [1, 4]
+    optics: &tex_optics_60x
+      pixel_size_um: 0.108
+      psf_sigma_um: 0.227
+      halo_strength: [1.60, 2.05]
+      halo_lowpass_sigma_um: 0.603
+      intensity_gain: [0.30, 0.37]
+      shadeoff_threshold: 1.59
+      shadeoff_strength: [0.24, 0.33]
+      body_edge_smooth_sigma_um: 0.05
+    microtexture: *tex_micro
+
+  - name: 60x_textured_dense
+    n_frames: 440
+    microtexture_prob: 1.0
+    parasites_per_frame: [4, 9]
+    optics: *tex_optics_60x
+    microtexture: *tex_micro
+
+  - name: 60x_textured_very_dense
+    n_frames: 260
+    microtexture_prob: 1.0
+    parasites_per_frame: [9, 18]
+    optics: *tex_optics_60x
+    microtexture: *tex_micro
+
+  - name: 40x_textured_sparse
+    n_frames: 330
+    microtexture_prob: 1.0
+    parasites_per_frame: [2, 7]
+    optics: &tex_optics_40x
+      pixel_size_um: 0.163
+      psf_sigma_um: 0.227
+      halo_strength: [1.60, 2.05]
+      halo_lowpass_sigma_um: 0.603
+      intensity_gain: [0.30, 0.37]
+      shadeoff_threshold: 1.59
+      shadeoff_strength: [0.24, 0.33]
+      body_edge_smooth_sigma_um: 0.05
+    microtexture: *tex_micro
+
+  - name: 40x_textured_dense
+    n_frames: 330
+    microtexture_prob: 1.0
+    parasites_per_frame: [7, 16]
+    optics: *tex_optics_40x
+    microtexture: *tex_micro
+
+  # ===========================================================================
+  # HIGH-BACKGROUND-ARTIFACT (DIRTY) CELL FRAMES  --  BOOSTED ~4x + NEW COMBOS
+  # ---------------------------------------------------------------------------
+  # The hardest cases and the focus of this 20k build: cells embedded in HEAVY
+  # clutter (debris rings / hairs / bubbles overlapping cells), plus new
+  # dirt x density combinations so the model sees grime AND crowding together.
+  # ===========================================================================
+
+  # --- dirty backgrounds at every magnification (boosted) ------------------
+  - name: 20x_dirty_bg
+    n_frames: 600
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    clutter_level: [2.0, 4.0]
+    parasites_per_frame: [5, 17]
+
+  - name: 40x_dirty_bg
+    n_frames: 480
+    optics: *optics_40x
+    clutter_level: [2.0, 4.0]
+    parasites_per_frame: [4, 13]
+
+  - name: 60x_dirty_bg
+    n_frames: 600
+    clutter_level: [2.0, 4.0]
+    parasites_per_frame: [2, 8]
+
+  - name: 100x_dirty_bg
+    n_frames: 400
+    optics: *optics_100x
+    clutter_level: [2.0, 4.0]
+    parasites_per_frame: [1, 4]
+
+  - name: 60x_dirty_bg_extreme
+    n_frames: 360
+    clutter_level: [3.0, 5.0]
+    parasites_per_frame: [2, 8]
+
+  - name: 100x_textured_dirty
+    n_frames: 400
+    microtexture_prob: 1.0
+    clutter_level: [2.0, 4.0]
+    parasites_per_frame: [2, 6]
+    optics: *tex_optics_100x
+    microtexture: *tex_micro
+
+  # --- NEW: dirt x DENSE (heavy clutter AND many cells per tile) -----------
+  - name: 20x_dirty_dense
+    n_frames: 350
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    clutter_level: [2.0, 4.0]
+    parasites_per_frame: [17, 38]
+
+  - name: 60x_dirty_dense
+    n_frames: 350
+    clutter_level: [2.0, 4.0]
+    parasites_per_frame: [8, 17]
+
+  - name: 40x_dirty_dense
+    n_frames: 300
+    optics: *optics_40x
+    clutter_level: [2.0, 4.0]
+    parasites_per_frame: [12, 28]
+
+  # --- NEW: dirt x VERY-DENSE (crossing flagella amid heavy debris) --------
+  - name: 20x_dirty_very_dense
+    n_frames: 250
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+    clutter_level: [2.0, 4.0]
+    parasites_per_frame: [70, 139]
+
+  - name: 60x_dirty_very_dense
+    n_frames: 250
+    clutter_level: [2.0, 4.0]
+    parasites_per_frame: [28, 55]
+
+  # --- NEW: textured + dirty + dense (worst-case high-mag) -----------------
+  - name: 100x_textured_dirty_dense
+    n_frames: 250
+    microtexture_prob: 1.0
+    clutter_level: [2.0, 4.0]
+    parasites_per_frame: [5, 10]
+    optics: *tex_optics_100x
+    microtexture: *tex_micro
+
+  # ---------------------------------------------------------------------------
+  # NEGATIVE FRAMES - empty/clutter-only tiles. Clean ones ~scaled; dirty /
+  # extreme-artifact ones BOOSTED + extended to more magnifications so the model
+  # sees pure-debris fields (no cells) at every condition it will face.
+  # ---------------------------------------------------------------------------
+  - name: 60x_negatives
+    mode: negative
+    n_frames: 200
+    clutter_level: [1.0, 2.5]
+
+  - name: 20x_negatives
+    mode: negative
+    n_frames: 180
+    clutter_level: [1.0, 2.5]
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
+
+  - name: 40x_negatives
+    mode: negative
+    n_frames: 140
+    clutter_level: [1.0, 2.5]
+    optics: *optics_40x
+
+  - name: 100x_negatives
+    mode: negative
+    n_frames: 100
+    clutter_level: [1.0, 3.0]
+    optics: *optics_100x
+
+  # --- dirty / extreme-artifact negatives (boosted + new magnifications) ---
+  - name: 60x_negatives_dirty
+    mode: negative
+    n_frames: 250
+    clutter_level: [2.0, 4.0]
+    optics:
+      psf_sigma_um: 0.30
+      halo_strength: [0.8, 1.6]
+      halo_lowpass_sigma_um: [4.0, 7.0]
+    noise:
+      full_well_photons: [400, 1500]
+      read_noise_e: [4.0, 8.0]
+      bg_intensity: 0.55
+
+  - name: 60x_negatives_extreme_artifacts
+    mode: negative
+    n_frames: 180
+    clutter_level: [3.0, 5.0]
+    optics:
+      halo_strength: [1.0, 1.8]
+      halo_lowpass_sigma_um: [4.5, 7.0]
+
+  - name: 40x_negatives_dirty
+    mode: negative
+    n_frames: 150
+    clutter_level: [2.0, 4.0]
+    optics: *optics_40x
+    noise:
+      full_well_photons: [400, 1500]
+      read_noise_e: [4.0, 8.0]
+      bg_intensity: 0.55
+
+  - name: 100x_negatives_dirty
+    mode: negative
+    n_frames: 120
+    clutter_level: [2.0, 4.0]
+    optics: *optics_100x
+    noise:
+      full_well_photons: [400, 1500]
+      read_noise_e: [4.0, 8.0]
+      bg_intensity: 0.55
+
+  - name: 20x_negatives_extreme_artifacts
+    mode: negative
+    n_frames: 120
+    clutter_level: [3.0, 5.0]
+    optics:
+      pixel_size_um: 0.325
+      psf_sigma_um: 0.32
+      halo_lowpass_sigma_um: 4.0
