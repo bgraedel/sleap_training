@@ -16,6 +16,9 @@ UI niceties (improved):
   - the rendered image rescales to fit the preview pane (aspect preserved)
   - controls split into three tabs (Scene / Optics & Noise / Parasite)
   - keyboard shortcuts: Space = pause, R = reseed all, B = rebuild bg
+  - live skeleton overlay (toggle) so you can verify SLEAP keypoint labels
+  - playback speed decoupled from the frame-rate cap: "max fps" only controls
+    smoothness; "playback speed" controls how fast the biology evolves
 
 Install:
     pip install dearpygui
@@ -29,6 +32,7 @@ import json
 import time
 
 import numpy as np
+import cv2
 import dearpygui.dearpygui as dpg
 
 import synthetic_leishmania as L
@@ -289,18 +293,66 @@ def _deserialize(data, optics, noise, parasites_list):
 # ---------------------------------------------------------------------------
 # Selection-ring overlay
 # ---------------------------------------------------------------------------
-def _draw_selection_overlay(rgba, parasite, color=(1.0, 0.25, 0.25)):
+def _draw_selection_overlay(rgba, parasite, pixel_size_um, color=(1.0, 0.25, 0.25)):
     H, W = rgba.shape[:2]
     cx, cy = int(parasite.center_x), int(parasite.center_y)
     if not (0 <= cx < W and 0 <= cy < H):
         return
-    radius = int(max(parasite.body_length, parasite.flagellum_length) * 0.7) + 4
-    yy, xx = np.indices((H, W))
-    d2 = (xx - cx) ** 2 + (yy - cy) ** 2
+    # body_length / flagellum_length are in µm; convert to output pixels so the
+    # ring actually encircles the rendered cell (before the v2 µm migration
+    # these were reference-px and the ring silently shrank to the cell centre).
+    s = 1.0 / max(pixel_size_um, 1e-6)
+    radius = int(max(parasite.body_length, parasite.flagellum_length) * s * 0.7) + 4
+    # Operate only on a bbox around the ring instead of allocating full-frame
+    # index grids and a full-frame distance map every frame.
+    r_out = radius + 1
+    x0 = max(0, cx - r_out); x1 = min(W, cx + r_out + 1)
+    y0 = max(0, cy - r_out); y1 = min(H, cy + r_out + 1)
+    if x1 <= x0 or y1 <= y0:
+        return
+    yy, xx = np.indices((y1 - y0, x1 - x0))
+    d2 = (xx + x0 - cx) ** 2 + (yy + y0 - cy) ** 2
     ring = (d2 >= (radius - 1) ** 2) & (d2 <= (radius + 1) ** 2)
-    rgba[ring, 0] = color[0]
-    rgba[ring, 1] = color[1]
-    rgba[ring, 2] = color[2]
+    sub = rgba[y0:y1, x0:x1]
+    sub[ring, 0] = color[0]
+    sub[ring, 1] = color[1]
+    sub[ring, 2] = color[2]
+
+
+def _draw_keypoints_overlay(rgba, all_keypoints,
+                            node_color=(0.10, 1.0, 0.30),
+                            head_color=(1.0, 0.30, 0.30),
+                            tip_color=(0.30, 0.55, 1.0),
+                            edge_color=(1.0, 0.80, 0.10)):
+    """Overlay the SLEAP skeleton for every cell.
+
+    Chains: Head -> Base -> Flag1..FlagN -> Tip, plus the dividing-cell second
+    flagellum Base -> Flag2_1..Flag2_N -> Tip2. Occluded / off-image nodes are
+    already absent from each dict (``render_scene`` drops them), so the overlay
+    shows exactly what SLEAP would treat as visible. ``cv2`` draws non-AA lines
+    on the float32 RGBA buffer (AA is 8-bit only)."""
+    for kp in all_keypoints:
+        if not kp:
+            continue
+        flag_idx = sorted(int(n[4:]) for n in kp
+                          if n.startswith("Flag") and n[4:].isdigit())
+        flag2_idx = sorted(int(n[6:]) for n in kp
+                           if n.startswith("Flag2_") and n[6:].isdigit())
+        chains = (
+            ["Head", "Base"] + [f"Flag{k}" for k in flag_idx] + ["Tip"],
+            ["Base"] + [f"Flag2_{k}" for k in flag2_idx] + ["Tip2"],
+        )
+        for names in chains:
+            pts = [(int(round(kp[n][0])), int(round(kp[n][1])))
+                   for n in names if n in kp]
+            for a, b in zip(pts[:-1], pts[1:]):
+                cv2.line(rgba, a, b, (*edge_color, 1.0), 1, lineType=cv2.LINE_8)
+        for name, (x, y) in kp.items():
+            col = (head_color if name == "Head"
+                   else tip_color if name in ("Tip", "Tip2")
+                   else node_color)
+            cv2.circle(rgba, (int(round(x)), int(round(y))), 2,
+                       (*col, 1.0), -1, lineType=cv2.LINE_8)
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +389,13 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
         "t": 0.0, "paused": False, "mode": "fast",
         "n_parasites": n_parasites, "target_fps": target_fps,
         "selected": 0, "apply_to_all": False, "highlight": True,
+        "show_keypoints": True,
+        # Playback speed (sim-seconds per wall-second) is decoupled from
+        # target_fps; target_fps is now ONLY the render-rate cap. last_frame_time
+        # drives the wall-clock dt; frozen_noise_seed stabilises the image while
+        # paused so it doesn't shimmer.
+        "playback_speed": 0.25, "last_frame_time": None,
+        "frozen_noise_seed": 1234,
         "rebuild_bg": False, "reseed_all": False,
         "regen_schedule": False, "clear_schedule": False,
         "division_stage": 0.5,
@@ -367,6 +426,11 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
         "splitter_y":       0,
         "splitter_y_extent": 0,      # how far across the X axis the V-splitter runs
     }
+
+    # Preallocated RGBA display buffer (alpha fixed at 1.0); reused every frame
+    # instead of allocating a fresh (size, size, 4) array per render.
+    state["tex_buf"] = np.zeros((size, size, 4), dtype=np.float32)
+    state["tex_buf"][..., 3] = 1.0
 
     def flash(msg, dur=3.0):
         state["flash_msg"] = msg
@@ -513,16 +577,28 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
                                    default_value=n_parasites,
                                    min_value=0, max_value=64,
                                    callback=lambda s, a: state.update(n_parasites=a))
-                dpg.add_slider_float(label="target fps",
+                dpg.add_slider_float(label="max fps (smoothness)",
                                      default_value=target_fps,
                                      min_value=1.0, max_value=240.0,
                                      format="%.0f",
                                      callback=lambda s, a: state.update(target_fps=a))
+                dpg.add_slider_float(label="playback speed",
+                                     tag="playback_speed_slider",
+                                     default_value=state["playback_speed"],
+                                     min_value=0.02, max_value=2.0,
+                                     format="%.2fx",
+                                     callback=lambda s, a: state.update(playback_speed=a))
+                dpg.add_text("  max fps caps the render rate only; playback speed\n"
+                             "  sets how fast the biology evolves (1.0 = real time)",
+                             color=(140, 140, 140))
                 dpg.add_checkbox(label="paused", tag="cb_paused",
                                  callback=lambda s, a: state.update(paused=a))
                 dpg.add_checkbox(label="highlight selected",
                                  default_value=True,
                                  callback=lambda s, a: state.update(highlight=a))
+                dpg.add_checkbox(label="show keypoints", tag="cb_show_kp",
+                                 default_value=True,
+                                 callback=lambda s, a: state.update(show_keypoints=a))
 
                 dpg.add_separator()
                 with dpg.group(horizontal=True):
@@ -894,17 +970,45 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
                 flash(f"Import failed: {e}")
             state["import_path"] = None
 
-        dt = 1.0 / max(state["target_fps"], 1.0)
+        # --- Simulation timestep -------------------------------------------
+        # Decoupled from the render-rate cap: dt is the REAL wall-clock time
+        # since the last frame, times the playback-speed multiplier. So
+        # "max fps" only controls smoothness (how many frames we draw), while
+        # "playback speed" controls how fast the biology evolves (1.0 = real
+        # time). wall_dt is clamped so a stall or a long pause doesn't make the
+        # next step jump.
+        now0 = time.perf_counter()
+        if state["last_frame_time"] is None:
+            wall_dt = 1.0 / max(state["target_fps"], 1.0)
+        else:
+            wall_dt = now0 - state["last_frame_time"]
+        state["last_frame_time"] = now0
+        wall_dt = min(max(wall_dt, 0.0), 0.1)
+        sim_dt = wall_dt * max(state["playback_speed"], 0.0)
 
-        # Render
-        if not state["paused"]:
+        paused = state["paused"]
+
+        # Advance motion + beat only while running.
+        if not paused:
+            L.advance_parasites(parasites, sim_dt, shape, periodic=True,
+                                t=state["t"], optics=optics)
+            state["t"] += sim_dt
+
+        # Render EVERY frame (even when paused) so parameter edits show
+        # immediately. While paused, use a fixed-seed rng so the camera noise
+        # is frozen instead of shimmering between otherwise-identical frames.
+        render_rng = (rng if not paused
+                      else np.random.default_rng(state["frozen_noise_seed"]))
+        frame_keypoints = []
+        try:
             mode = state["mode"]
             if mode == "skip_noise":
                 phase = np.zeros(shape, dtype=np.float32)
                 transmission = np.ones(shape, dtype=np.float32)
                 for p in parasites:
-                    tile, (y0, x0), _, transm = L.render_parasite_phase(
+                    tile, (y0, x0), kp, transm = L.render_parasite_phase(
                         p, state["t"], shape, optics=optics)
+                    frame_keypoints.append(kp)
                     if tile is None:
                         continue
                     th, tw = tile.shape
@@ -916,42 +1020,46 @@ def run(size=512, n_parasites=4, target_fps=60.0, seed=42):
                 intensity = L.simulate_phase_contrast_fast(phase, optics)
                 img = np.clip(background * intensity * transmission, 0, 1)
             else:
-                img, _ = L.render_scene(
+                img, frame_keypoints = L.render_scene(
                     parasites, state["t"], shape, optics, noise,
-                    background=background, rng=rng,
+                    background=background, rng=render_rng,
                     fast=(mode == "fast"))
-            L.advance_parasites(parasites, dt, shape, periodic=True,
-                                t=state["t"], optics=optics)
-            state["t"] += dt
+        except Exception as e:
+            flash(f"Render error: {e}")
+            img = np.zeros(shape, dtype=np.float32)
+            frame_keypoints = []
 
-            # --- Kymograph: record selected parasite's tangent-angle profile.
-            # beat_tangent_angle returns cell-frame tangent angles, exactly
-            # what Wheeler 2020 Fig 2 plots. We sample BEFORE the next
-            # state["t"] update so the row aligns with the rendered frame.
-            if parasites:
-                sel = min(state["selected"], len(parasites) - 1)
-                try:
-                    _, theta = L.beat_tangent_angle(parasites[sel], state["t"],
-                                                   n_points=KYMO_FLAG_SAMPLES)
-                    _update_kymo_buffer(state["kymo_buffer"], theta.astype(np.float32))
-                except Exception:
-                    pass
-            kymo_rgba = _kymo_to_rgba(
-                state["kymo_buffer"],
-                vmax=np.deg2rad(state["kymo_vmax_deg"]),
-                gamma=state["kymo_gamma"],
-            )
-            dpg.set_value("kymo_tex", kymo_rgba.ravel())
+        # --- Kymograph: sample the selected cell's tangent angle at the SAME
+        # t the frame was rendered (positions are advanced BEFORE rendering
+        # above, so this is now aligned — the old code sampled one dt late),
+        # and scroll the history only while running.
+        if not paused and parasites:
+            sel = min(state["selected"], len(parasites) - 1)
+            try:
+                _, theta = L.beat_tangent_angle(parasites[sel], state["t"],
+                                               n_points=KYMO_FLAG_SAMPLES)
+                _update_kymo_buffer(state["kymo_buffer"], theta.astype(np.float32))
+            except Exception:
+                pass
+        kymo_rgba = _kymo_to_rgba(
+            state["kymo_buffer"],
+            vmax=np.deg2rad(state["kymo_vmax_deg"]),
+            gamma=state["kymo_gamma"],
+        )
+        dpg.set_value("kymo_tex", kymo_rgba.ravel())
 
-            tex = np.empty((size, size, 4), dtype=np.float32)
-            tex[..., 0] = img
-            tex[..., 1] = img
-            tex[..., 2] = img
-            tex[..., 3] = 1.0
-            if state["highlight"] and parasites:
-                idx = min(state["selected"], len(parasites) - 1)
-                _draw_selection_overlay(tex, parasites[idx])
-            dpg.set_value("frame_tex", tex.ravel())
+        # --- Compose the display texture (grayscale -> RGBA) in a reused
+        # buffer; alpha stays 1.0 from initialisation.
+        tex = state["tex_buf"]
+        tex[..., 0] = img
+        tex[..., 1] = img
+        tex[..., 2] = img
+        if state["show_keypoints"]:
+            _draw_keypoints_overlay(tex, frame_keypoints)
+        if state["highlight"] and parasites:
+            idx = min(state["selected"], len(parasites) - 1)
+            _draw_selection_overlay(tex, parasites[idx], optics.pixel_size_um)
+        dpg.set_value("frame_tex", tex.ravel())
 
         # Status line
         now = time.perf_counter()
